@@ -1001,6 +1001,7 @@ class PlanViz2024:
         self.is_heat_map = tk.BooleanVar()
         self.is_highway = tk.BooleanVar()
         self.is_heuristic_map = tk.BooleanVar()
+        self.action_rl_visible = tk.BooleanVar()
 
         self.is_run.set(False)
         self.is_grid.set(_grid)
@@ -1137,6 +1138,14 @@ class PlanViz2024:
         self.show_all_conf_ag_button.grid(row=self.row_idx, column=0, columnspan=2, sticky="w")
         self.row_idx += 1
 
+        self.action_rl_button = tk.Checkbutton(self.frame, text="Show RL actions",
+                                                      font=("Arial",TEXT_SIZE),
+                                                      variable=self.action_rl_visible,
+                                                      onvalue=True, offvalue=False,
+                                                      command=self.switch_action_rl)
+        self.action_rl_button.grid(row=self.row_idx, column=0, columnspan=2, sticky="w")
+        self.row_idx += 1
+
 
     def init_label(self):
         # ---------- Show tasks according to their states ---------- #
@@ -1145,7 +1154,9 @@ class PlanViz2024:
         self.task_shown = ttk.Combobox(self.frame, width=15, state="readonly",
                                        values=["Next Errand",
                                                "Assigned Tasks",
-                                               "All Tasks"
+                                               "All Tasks",
+                                               "none",
+                                               "Free first errands"
                                                ])
         self.task_shown.current(0)
         self.task_shown.bind("<<ComboboxSelected>>", self.show_tasks_by_click)
@@ -1669,6 +1680,17 @@ class PlanViz2024:
             if first_errand_t != -1:
                 self.show_ag_plan(ag_idx, first_errand_t, moving=True)
 
+    def switch_action_rl(self):
+        if self.pcf.draw_action_rl:
+            if self.action_rl_visible.get() is True:
+                for node_block in self.pcf.action_rl_node_blocks:
+                    for obj in node_block:
+                        self.pcf.canvas.itemconfig(obj, state=tk.DISABLED)
+            else:
+                for node_block in self.pcf.action_rl_node_blocks:
+                    for obj in node_block:
+                        self.pcf.canvas.itemconfig(obj, state=tk.HIDDEN)
+
     def show_task_seq(self, agent_idx, task_idx, first_errand, moving=False):
         def get_center_coords(canvas, item_id):
             # Get the coordinates of the bounding box of the item
@@ -1806,6 +1828,10 @@ class PlanViz2024:
                 elif self.task_shown.get() == "Assigned Tasks":
                     if task.state in ["assigned", "newlyassigned"] and task_t >= self.pcf.cur_tstep:
                         self.pcf.canvas.itemconfig(task.task_obj.obj, state=tk.DISABLED)
+                elif self.task_shown.get() == "Free first errands":
+                    if task.state == "unassigned" and seq_task.release_tstep <= self.pcf.cur_tstep:
+                        self.pcf.canvas.itemconfig(task.task_obj.obj, state=tk.DISABLED)
+                        break
                 # elif task.state == self.task_shown.get():
                 #     self.pcf.canvas.itemconfig(task.task_obj.obj, state=tk.DISABLED)
         if self.show_task_idx.get():
@@ -1936,6 +1962,32 @@ class PlanViz2024:
             self.pcf.canvas.update()
             time.sleep(self.pcf.delay)
 
+        # myPV
+        if self.pcf.cur_tstep+2 in self.pcf.unnasigned_schedule.keys():
+            for agent_id in self.pcf.unnasigned_schedule[self.pcf.cur_tstep+2]:
+                self.change_ag_color(agent_id, AGENT_COLORS["unassigned"])
+        if self.pcf.cur_tstep+2 in self.pcf.actual_schedule.keys():
+            for _, agent_id in self.pcf.actual_schedule[self.pcf.cur_tstep+2]:
+                self.change_ag_color(agent_id, AGENT_COLORS["newlyassigned"])
+        if self.pcf.cur_tstep+1 in self.pcf.actual_schedule.keys():
+            for _, agent_id in self.pcf.actual_schedule[self.pcf.cur_tstep+1]:
+                self.change_ag_color(agent_id, AGENT_COLORS["assigned"])
+
+        # Update action_rl colors
+        if self.pcf.draw_action_rl:
+            if str(self.pcf.cur_tstep+1) in self.pcf.action_rl.keys():
+                for node, val in enumerate(self.pcf.action_rl[str(self.pcf.cur_tstep+1)]):
+                    val_norm = val / self.pcf.action_rl_MAX
+                    color = self.pcf.colormap(val_norm)
+                    hex_color = "#{:02x}{:02x}{:02x}".format(int(color[0] * 255), int(color[1] * 255), int(color[2] * 255))
+                    for obj in self.pcf.action_rl_node_blocks[node]:
+                        self.pcf.canvas.itemconfig(obj, fill=hex_color)
+            else:
+                for node in range(len(self.pcf.action_rl_node_blocks)):
+                    for obj in self.pcf.action_rl_node_blocks[node]:
+                        self.pcf.canvas.itemconfig(obj, fill="white")
+
+
         # Update the location of each agent
         for (ag_id, agent) in self.pcf.agents.items():
             agent.agent_obj.loc = (agent.path[next_tstep[ag_id]][0],
@@ -1955,8 +2007,8 @@ class PlanViz2024:
                 task_id = global_task_id // self.pcf.max_seq_num
                 seq_id = global_task_id % self.pcf.max_seq_num
                 self.pcf.seq_tasks[task_id].tasks[seq_id].state = "assigned"
-                self.change_task_color(task_id, seq_id, TASK_COLORS["assigned"])
-                self.change_ag_color(ag_id, AGENT_COLORS["assigned"])
+                self.change_task_color(task_id, seq_id, TASK_COLORS["assigned"])      #pyPV
+                # self.change_ag_color(ag_id, AGENT_COLORS["assigned"])
                 if not self.pcf.shown_path_agents or ag_id in self.pcf.shown_path_agents:
                     self.show_single_task(task_id, seq_id)
             self.pcf.event_tracker["aid"] += 1
@@ -2009,7 +2061,7 @@ class PlanViz2024:
                 assert self.pcf.seq_tasks[task_id].tasks[seq_id].state == "assigned"
                 self.pcf.seq_tasks[task_id].tasks[seq_id].state = "unassigned"
                 self.change_task_color(task_id, seq_id, TASK_COLORS["unassigned"])
-                self.change_ag_color(ag_id, AGENT_COLORS["assigned"])
+                # self.change_ag_color(ag_id, AGENT_COLORS["assigned"])
                 if not self.pcf.shown_path_agents or ag_id in self.pcf.shown_path_agents:
                     self.show_single_task(task_id, seq_id)
             self.pcf.event_tracker["aid"] = prev_aid
@@ -2134,7 +2186,7 @@ class PlanViz2024:
                     seq_id = global_task_id % self.pcf.max_seq_num
                     self.pcf.seq_tasks[task_id].tasks[seq_id].state = "assigned"
                     self.change_task_color(task_id, seq_id, TASK_COLORS["assigned"])
-                    self.pcf.agents[ag_id].agent_obj.color = AGENT_COLORS["assigned"]
+                    # self.pcf.agents[ag_id].agent_obj.color = AGENT_COLORS["assigned"]     #myPV
                     if not self.pcf.shown_path_agents or ag_id in self.pcf.shown_path_agents:
                         self.show_single_task(task_id, seq_id)
             else:  # a_time > self.pcf.cur_tstep
@@ -2185,6 +2237,8 @@ class PlanViz2024:
             # Check colliding agents
             if show_collide:
                 self.change_ag_color(ag_id, AGENT_COLORS["collide"])
+
+        
 
         self.show_agent_index()
         self.update_event_list()

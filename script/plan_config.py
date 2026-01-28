@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import Normalize
 from matplotlib import cm
+import matplotlib.pyplot as plt
 from util import (
     TASK_COLORS, AGENT_COLORS, DIRECTION, OBSTACLES, MAP_CONFIG, INT_MAX, DBL_MAX,
     get_map_name, get_dir_loc, state_transition, state_transition_mapf,
@@ -689,9 +690,9 @@ class PlanConfig2023:
                 p_obj = None
                 if _pid_ > 0 and p_loc == (self.exec_paths[ag_id][_pid_-1][0],
                                              self.exec_paths[ag_id][_pid_-1][1]):
-                    p_obj = self.render_obj(ag_id, p_loc, "rectangle", "purple", tk.DISABLED, 0.25)
+                    p_obj = self.render_obj(ag_id, p_loc, "rectangle", "purple", tk.DISABLED, 0.25, tags="path")
                 else:  # non-wait action, smaller rectangle
-                    p_obj = self.render_obj(ag_id, p_loc, "rectangle", "purple", tk.DISABLED, 0.4)
+                    p_obj = self.render_obj(ag_id, p_loc, "rectangle", "purple", tk.DISABLED, 0.4, tags="path")
                 if p_obj is not None:
                     self.canvas.tag_lower(p_obj.obj)
                     self.canvas.itemconfigure(p_obj.obj, state=tk.HIDDEN)
@@ -749,6 +750,7 @@ class PlanConfig2024:
         self.events:Dict[str, Dict[int, Dict[int,int]]] = {"assigned": {}, "finished": {}}
         self.event_tracker = {"aTime": [], "aid": 0, "fTime": [], "fid": 0}
         self.actual_schedule:Dict[int, List[Tuple[int]]] = {}  # timestep -> (task id, agent id)
+        self.unnasigned_schedule:Dict[int, List[int]] = {} # timestep -> agent id,      #myPV
 
         self.grids:List = []
         self.start_loc  = {}
@@ -764,12 +766,14 @@ class PlanConfig2024:
         self.shown_tasks_seq:Set[int] = set()
         self.conflict_agents:Set[int] = set()
 
+        self.draw_action_rl = False
+
         self.load_map(map_file)  # Load from the map file
         
         # Initialize the window
         self.window = tk.Tk()
 
-        self.screen_width = self.window.winfo_screenwidth()
+        self.screen_width = self.window.winfo_screenwidth()// 1
 
         pixel_per_grid = (self.screen_width - 25) // (self.width + 1)
 
@@ -812,6 +816,7 @@ class PlanConfig2024:
         # Render instance on canvas
         self.render_env()
         self.render_agents()
+        self.adjust_layering()
 
 
     def load_map(self, map_file:str) -> None:
@@ -912,6 +917,9 @@ class PlanConfig2024:
                     continue
                 task_id = int(ele.split(":")[1])
                 if task_id == -1:
+                    if assign_tstep not in self.unnasigned_schedule:            #myPV
+                        self.unnasigned_schedule[assign_tstep] = []
+                    self.unnasigned_schedule[assign_tstep].append(ag_id)
                     continue
                 if assign_tstep not in self.actual_schedule:
                     self.actual_schedule[assign_tstep] = []
@@ -982,6 +990,23 @@ class PlanConfig2024:
         print("Done!")
 
 
+    def load_action_rl(self, data:Dict):
+        print("Loading RL actions", end="...")
+        if "action_rl" not in data or "nodeRegions" not in data:
+            print("No RL actions or nodeRegions.")
+            return
+        
+        self.draw_action_rl = True
+        self.action_rl = data["action_rl"]
+        self.node_regions = data["nodeRegions"]
+        self.action_rl_MAX = 0.1
+        # for step, action in self.action_rl.items():
+        #     for val in action:
+        #         if val > self.action_rl_MAX:
+        #             self.action_rl_MAX = val
+
+
+
     def load_plan(self, plan_file):
         data = {}
         with open(file=plan_file, mode="r", encoding="UTF-8") as fin:
@@ -1005,6 +1030,7 @@ class PlanConfig2024:
         self.load_sequential_tasks(data)
         self.load_schedule(data)
         self.load_events(data)
+        self.load_action_rl(data)
 
 
     def render_obj(self, idx:int, loc:Tuple[int], shape:str="rectangle",
@@ -1058,6 +1084,35 @@ class PlanConfig2024:
 
     def render_env(self) -> None:
         print("Rendering the environment ... ", end="")
+        # Render action_rl
+        if self.draw_action_rl:
+            nNodes = max(self.node_regions) + 1
+            print("nNodes: ", nNodes)
+            self.action_rl_node_blocks = [[] for _ in range(nNodes)]
+            for loc_idx, node in enumerate(self.node_regions):
+                cid = loc_idx % self.width
+                rid = loc_idx // self.width
+                if self.env_map[rid][cid] == 0:
+                    continue
+                _ac_ = self.canvas.create_rectangle(cid * self.tile_size,
+                                                    rid * self.tile_size,
+                                                    (cid + 1) * self.tile_size,
+                                                    (rid + 1) * self.tile_size,
+                                                    fill="white",
+                                                    outline="",
+                                                    state=tk.HIDDEN,
+                                                    tags="action_rl")
+                self.action_rl_node_blocks[node].append(_ac_)
+            self.colormap = plt.cm.viridis
+
+            if str(self.cur_tstep) in self.action_rl.keys():
+                for node, val in enumerate(self.action_rl[str(self.cur_tstep)]):
+                    val_norm = val / self.action_rl_MAX
+                    color = self.colormap(val_norm)
+                    hex_color = "#{:02x}{:02x}{:02x}".format(int(color[0] * 255), int(color[1] * 255), int(color[2] * 255))
+                    for obj in self.action_rl_node_blocks[node]:
+                        self.canvas.itemconfig(obj, fill=hex_color)
+
         # Render grids
         for rid in range(self.height):  # Render horizontal lines
             _line_ = self.canvas.create_line(0,
@@ -1151,9 +1206,17 @@ class PlanConfig2024:
         if self.team_size != len(self.exec_paths):
             raise ValueError("Missing actual paths!")
 
+        start_step = self.start_tstep+1
         for ag_id in range(self.team_size):  # Render the actual agents
+            color = AGENT_COLORS["assigned"]
+            if start_step in self.unnasigned_schedule.keys():
+                if ag_id in self.unnasigned_schedule[start_step]:
+                    color = AGENT_COLORS["unassigned"]
+            if start_step in self.actual_schedule.keys():
+                if ag_id in [ele[1] for ele in self.actual_schedule[start_step]]:
+                    color = AGENT_COLORS["newlyassigned"]
             agent_obj = self.render_obj(ag_id, self.exec_paths[ag_id][0], "oval",
-                                        AGENT_COLORS["assigned"], tk.DISABLED, 0.05, str(ag_id))
+                                        color, tk.DISABLED, 0.05, str(ag_id))
             dir_obj = None
             if self.agent_model == "MAPF_T":
                 dir_loc = get_dir_loc(self.exec_paths[ag_id][0])
@@ -1169,4 +1232,18 @@ class PlanConfig2024:
             agent = Agent(ag_id, agent_obj, start_objs[ag_id], self.plan_paths[ag_id],
                           path_objs[ag_id], self.exec_paths[ag_id], dir_obj)
             self.agents[ag_id] = agent
+        # # myPV
+        # start_step = self.start_tstep
+        # if start_step in self.unnasigned_schedule.keys():
+        #     for agent_id in self.unnasigned_schedule[start_step]:
+        #         agent = self.agents[agent_id]
+        #         self.canvas.itemconfigure(agent.agent_obj.obj, fill=AGENT_COLORS["unassigned"])
+        # if start_step in self.actual_schedule.keys():
+        #     for _, agent_id in self.actual_schedule[start_step]:
+        #         agent = self.agents[agent_id]
+        #         self.canvas.itemconfigure(agent.agent_obj.obj, fill=AGENT_COLORS["newlyassigned"])
         print("Done!")
+
+    def adjust_layering(self):
+        self.canvas.tag_lower("path")
+        self.canvas.tag_lower("action_rl")

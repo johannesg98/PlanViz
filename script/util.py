@@ -16,7 +16,8 @@ TASK_COLORS: Dict[int, str] = {
 AGENT_COLORS: Dict[str, str] = {
     "newlyassigned": "yellowgreen",
     "assigned": "deepskyblue",
-    "collide": "red"
+    "collide": "red",
+    "unassigned": "yellow"                  #pyPV
 }
 
 DIRECTION: Dict[str,int] = {"E":0, "N":1, "W":2, "S":3, "N/A":-1}
